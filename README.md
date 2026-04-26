@@ -12,25 +12,31 @@ next scan, so the agent gets sharper with every pass.
    walk source files ──▶│ analyze_file (Claude call)  │──▶ FileRecord
                         └─────────────────────────────┘         │
                                                                 ▼
-                                                       memory/source_files.json
+                                                   memory/files/<slug>.md
                                                                 │
    every N files                                                │
         │                                                       │
         ▼                                                       │
-┌───────────────────┐    fresh canonical heuristics             │
-│ reflect (Claude)  │◀──────────────────────────────────────────┘
-└───────────────────┘
-        │
-        ▼
-memory/heuristics.json ──▶ injected into next scan's system prompt
+┌──────────────────────────┐    edits via memory tool           │
+│ reflect (tool-using      │◀──────────────────────────────────┘
+│ Claude session +         │
+│ Anthropic Memory tool)   │──▶ memory/heuristics/*.md
+└──────────────────────────┘                │
+                                            │
+                                            ▼
+                                injected into next scan's system prompt
 ```
 
-- **`memory/source_files.json`** — per-file analyses (language, purpose, key
-  symbols, dependencies, notes), keyed by relative path. Files whose
-  `content_sha` is unchanged are skipped on re-scan.
-- **`memory/heuristics.json`** — codebase-level patterns the agent learned
-  about *this* repo. Loaded into the system prompt on every analysis call;
-  rewritten from scratch on each reflection pass.
+- **`memory/files/<slug>.md`** — one Markdown file per analyzed source
+  file. YAML frontmatter holds structured fields (path, content_sha,
+  language, key_symbols, dependencies); the body holds the prose Purpose
+  and Notes. Skipped on re-scan when `content_sha` matches.
+- **`memory/heuristics/*.md`** — codebase-level patterns. Owned by Claude
+  via the Anthropic Memory tool (`memory_20250818`); the model reads,
+  edits, splits, and deletes files here as it reflects. Read into the
+  system prompt on every per-file analysis.
+
+Both directories live in git as small, hand-mergeable Markdown files.
 
 ## Setup
 
@@ -73,8 +79,8 @@ agent.scan("./src")
 for record in memory.all_files():
     print(record.path, "—", record.purpose)
 
-for h in memory.heuristics():
-    print("•", h.text)
+# Heuristics are owned by Claude (via the Memory tool); read them as text:
+print(memory.heuristics_text())
 ```
 
 ## Layout
@@ -82,17 +88,21 @@ for h in memory.heuristics():
 ```
 discover_agent/
 ├── __init__.py
-├── __main__.py    # CLI: python -m discover_agent <path>
+├── __main__.py    # CLI: discover-agent <path>
 ├── agent.py       # DiscoverAgent — scan + analyze_file + reflect
-└── memory.py      # Memory, FileRecord, Heuristic
-memory/            # written at runtime (git-ignored)
+└── memory.py      # Memory, FileRecord
+memory/
+├── files/         # one Markdown file per analyzed source file
+└── heuristics/    # owned by Claude via the Anthropic Memory tool
 ```
 
 ## Notes
 
-- Uses `claude-opus-4-7` with adaptive thinking and `output_config.format` for
-  schema-validated JSON. Prompt caching keeps the static system prompt warm
-  across the per-file calls in a scan.
+- Uses `claude-opus-4-7` with adaptive thinking. Per-file analysis uses
+  `output_config.format` for schema-validated JSON; reflection uses the
+  Anthropic Memory tool (`memory_20250818`) via the SDK's
+  `BetaLocalFilesystemMemoryTool` so Claude itself decides what to keep,
+  refine, or discard.
 - Files larger than 200KB or non-UTF-8 are skipped.
 - Memory writes are atomic (write-to-temp + rename), so an interrupted scan
-  won't corrupt the JSON store.
+  won't corrupt the store.
