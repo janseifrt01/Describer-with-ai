@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "describer-with-ai"
+version = "0.1.0"
+description = "Self-improving Discover Agent that scans source code and remembers what it learns."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Describer-with-ai contributors" }]
+keywords = ["claude", "anthropic", "agent", "code-analysis", "memory"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "anthropic>=0.92.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+discover-agent = "discover_agent.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/janseifrt01/Describer-with-ai"
+
+[tool.setuptools.packages.find]
+include = ["discover_agent*"]
+exclude = ["memory*", "tests*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

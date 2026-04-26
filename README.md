@@ -35,8 +35,8 @@ memory/heuristics.json ──▶ injected into next scan's system prompt
 ## Setup
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env       # then put your ANTHROPIC_API_KEY in .env
+pip install -e .            # or `pip install -e ".[dev]"` for pytest + ruff
+cp .env.example .env        # then put your ANTHROPIC_API_KEY in .env
 ```
 
 ## Usage
@@ -44,19 +44,21 @@ cp .env.example .env       # then put your ANTHROPIC_API_KEY in .env
 Scan a directory:
 
 ```bash
+discover-agent /path/to/your/project
+# or, equivalently:
 python -m discover_agent /path/to/your/project
 ```
 
 Re-run reflection over existing memory without re-scanning:
 
 ```bash
-python -m discover_agent --reflect-only .
+discover-agent --reflect-only .
 ```
 
 Customize the reflection cadence:
 
 ```bash
-python -m discover_agent --reflect-every 5 ./src
+discover-agent --reflect-every 5 ./src
 ```
 
 ## As a library

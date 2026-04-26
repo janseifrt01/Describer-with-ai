@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--memory-dir",
         default="memory",
-        help="Where to read/write memory JSON files (default: ./memory).",
+        help="Where to read/write memory files (default: ./memory).",
     )
     parser.add_argument(
         "--reflect-every",
