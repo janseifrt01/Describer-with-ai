@@ -3,5 +3,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-memory/*.json
-!memory/.gitkeep
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
