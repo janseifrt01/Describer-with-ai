@@ -1,17 +1,21 @@
 """Persistent memory for the Discover Agent.
 
-Storage is split across small Markdown files so the memory directory merges
-cleanly in git:
+Storage is split across two areas, both designed to merge cleanly in git:
 
 - ``memory/files/<slug>.md`` — one file per analyzed source file. YAML
   frontmatter holds structured fields (path, content_sha, language, symbols,
-  dependencies); the body holds the prose Purpose and Notes sections.
-- ``memory/heuristics.md`` — bullet list of codebase-level heuristics
-  rewritten on each reflection pass.
+  dependencies); the body holds the prose Purpose and Notes sections. The
+  Discover Agent owns these files and rewrites each one when its source
+  changes, so independent branches analyzing different files produce
+  non-conflicting diffs.
 
-Per-record files mean concurrent branches modifying different source files
-produce independent, non-conflicting diffs. Heuristics still rewrite as a
-whole, but as a small Markdown bullet list they're easy to merge by hand.
+- ``memory/heuristics/`` — owned by the Anthropic Memory tool
+  (`memory_20250818`). The model reads, edits, splits, and deletes files
+  here as it reflects. We don't impose a schema; the model decides how to
+  organize its codebase-level knowledge (e.g. ``architecture.md``,
+  ``conventions.md``, ``gotchas.md``). On every per-file analysis the
+  agent reads all files in this directory and concatenates them into the
+  system prompt.
 """
 
 from __future__ import annotations
@@ -20,10 +24,9 @@ import hashlib
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -46,12 +49,6 @@ class FileRecord:
     dependencies: list[str] = field(default_factory=list)
     notes: str = ""
     analyzed_at: str = field(default_factory=_now)
-
-
-@dataclass
-class Heuristic:
-    text: str
-    tags: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -121,52 +118,6 @@ def _parse_file_record(text: str) -> FileRecord:
 
 
 # ---------------------------------------------------------------------------
-# Heuristics render / parse
-# ---------------------------------------------------------------------------
-
-_HEURISTICS_HEADER = (
-    "# Codebase Heuristics\n\n"
-    "<!-- Rewritten on each reflection pass. Each bullet is one heuristic. "
-    "Tags follow the bullet text in an HTML comment. -->\n\n"
-)
-
-_HEURISTIC_LINE_RE = re.compile(
-    r"^-\s+(?P<text>.+?)(?:\s*<!--\s*tags:\s*(?P<tags>[^>]*?)\s*-->)?\s*$"
-)
-
-
-def _render_heuristics(items: list[Heuristic]) -> str:
-    if not items:
-        return _HEURISTICS_HEADER + "_(none yet)_\n"
-    lines = [_HEURISTICS_HEADER.rstrip(), ""]
-    for h in items:
-        text = h.text.strip()
-        if not text:
-            continue
-        if h.tags:
-            tag_str = ", ".join(t.strip() for t in h.tags if t.strip())
-            lines.append(f"- {text} <!-- tags: {tag_str} -->")
-        else:
-            lines.append(f"- {text}")
-    return "\n".join(lines) + "\n"
-
-
-def _parse_heuristics(text: str) -> list[Heuristic]:
-    items: list[Heuristic] = []
-    for line in text.splitlines():
-        m = _HEURISTIC_LINE_RE.match(line)
-        if not m:
-            continue
-        body = m.group("text").strip()
-        if not body or body.startswith("_("):
-            continue
-        tags_raw = m.group("tags") or ""
-        tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-        items.append(Heuristic(text=body, tags=tags))
-    return items
-
-
-# ---------------------------------------------------------------------------
 # Memory facade
 # ---------------------------------------------------------------------------
 
@@ -174,10 +125,10 @@ class Memory:
     def __init__(self, root: str | os.PathLike[str] = "memory") -> None:
         self.root = Path(root)
         self.files_dir = self.root / "files"
-        self.heuristics_path = self.root / "heuristics.md"
+        self.heuristics_dir = self.root / "heuristics"
         self.files_dir.mkdir(parents=True, exist_ok=True)
+        self.heuristics_dir.mkdir(parents=True, exist_ok=True)
         self._files: dict[str, FileRecord] = {}
-        self._heuristics: list[Heuristic] = []
         self._load()
 
     # -- IO ------------------------------------------------------------
@@ -189,10 +140,6 @@ class Memory:
             except (ValueError, KeyError, yaml.YAMLError):
                 continue
             self._files[rec.path] = rec
-        if self.heuristics_path.exists():
-            self._heuristics = _parse_heuristics(
-                self.heuristics_path.read_text(encoding="utf-8")
-            )
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
@@ -213,13 +160,6 @@ class Memory:
     def _write_file_record(self, rec: FileRecord) -> None:
         self._atomic_write(self._file_path(rec.path), _render_file_record(rec))
 
-    def save_heuristics(self) -> None:
-        self._atomic_write(self.heuristics_path, _render_heuristics(self._heuristics))
-
-    def save(self) -> None:
-        """Flush heuristics. File records are written incrementally on upsert."""
-        self.save_heuristics()
-
     # -- File records --------------------------------------------------
 
     def get_file(self, path: str) -> FileRecord | None:
@@ -238,20 +178,30 @@ class Memory:
 
     # -- Heuristics ----------------------------------------------------
 
-    def add_heuristic(self, text: str, tags: list[str] | None = None) -> None:
-        self._heuristics.append(Heuristic(text=text, tags=tags or []))
+    def heuristics_text(self) -> str:
+        """Concatenate every heuristics file into one block for the system prompt.
 
-    def heuristics(self) -> list[Heuristic]:
-        return list(self._heuristics)
+        The Anthropic Memory tool owns the directory; we just read whatever
+        is there. Returns an empty string if no heuristics exist yet.
+        """
+        if not self.heuristics_dir.exists():
+            return ""
+        parts: list[str] = []
+        for md in sorted(self.heuristics_dir.rglob("*.md")):
+            rel = md.relative_to(self.heuristics_dir)
+            text = md.read_text(encoding="utf-8").strip()
+            if not text:
+                continue
+            parts.append(f"### From `{rel}`\n\n{text}")
+        return "\n\n".join(parts)
 
-    def replace_heuristics(self, items: list[Heuristic]) -> None:
-        self._heuristics = list(items)
-        self.save_heuristics()
+    def heuristics_files(self) -> list[Path]:
+        return sorted(self.heuristics_dir.rglob("*.md"))
 
     # -- Stats ---------------------------------------------------------
 
     def stats(self) -> dict[str, int]:
         return {
             "files": len(self._files),
-            "heuristics": len(self._heuristics),
+            "heuristics_files": len(self.heuristics_files()),
         }

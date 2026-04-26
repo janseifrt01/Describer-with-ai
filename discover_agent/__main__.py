@@ -1,4 +1,4 @@
-"""CLI entrypoint: ``python -m discover_agent <path>``."""
+"""CLI entrypoint: ``discover-agent <path>`` (or ``python -m discover_agent``)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .memory import Memory
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="discover_agent",
+        prog="discover-agent",
         description="Scan a codebase, store findings to memory, self-improve via reflection.",
     )
     parser.add_argument("path", help="Root directory to scan.")
@@ -38,10 +38,13 @@ def main(argv: list[str] | None = None) -> int:
     agent = DiscoverAgent(memory=memory, reflect_every=args.reflect_every)
 
     if args.reflect_only:
-        new_heuristics = agent.reflect()
-        memory.save()
+        agent.reflect()
         print(json.dumps(
-            {"heuristics": [h.text for h in new_heuristics], **memory.stats()},
+            {
+                "heuristics_files": [str(p.relative_to(memory.heuristics_dir))
+                                     for p in memory.heuristics_files()],
+                **memory.stats(),
+            },
             indent=2,
         ))
         return 0

@@ -1,4 +1,4 @@
-from .memory import Memory
 from .agent import DiscoverAgent
+from .memory import FileRecord, Memory
 
-__all__ = ["Memory", "DiscoverAgent"]
+__all__ = ["DiscoverAgent", "FileRecord", "Memory"]

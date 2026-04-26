@@ -1,21 +1,27 @@
 """DiscoverAgent — scans a codebase and stores structured findings to memory.
 
-The agent self-improves by reflecting on accumulated analyses and writing back
-heuristics that get injected into the system prompt on the next pass. Heuristics
-shape future scans, so each run gets a sharper view of the codebase.
+Two memory layers, two access patterns:
+
+- **Per-file records** are produced by a single, structured-output Claude call
+  per file (no tools, no loops). Result lands in ``memory/files/<slug>.md``.
+- **Heuristics** are managed by Claude itself via the Anthropic Memory tool
+  (``memory_20250818``) backed by ``memory/heuristics/``. The reflection
+  pass is a tool-using session: Claude reads what's already there, edits or
+  creates files as it sees fit, and the changes show up on disk for the next
+  scan to read into its system prompt.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
 
 import anthropic
+from anthropic.tools import BetaLocalFilesystemMemoryTool
 
-from .memory import FileRecord, Heuristic, Memory, sha256_text
+from .memory import FileRecord, Memory, sha256_text
 
 
 MODEL = "claude-opus-4-7"
@@ -58,27 +64,36 @@ Be concise. Do not invent symbols or dependencies you cannot see in the file.
 
 REFLECTION_SYSTEM = """You are the Discover Agent's reflection module.
 
-You will be shown a list of recent per-file analyses produced by the discover
-agent. Your job is to extract durable, codebase-level heuristics that will
-make future scans more accurate.
+You maintain a small, durable set of codebase-level heuristics in your
+`/memories` directory using the memory tool. Each call you receive a batch
+of recent per-file analyses produced by the discover agent. Your job:
+
+1. View `/memories` to see what heuristic files already exist, and read each
+   one to understand the current state.
+2. Compare against the new analyses and decide:
+   - Add new heuristics (create or insert) when patterns emerge.
+   - Refine existing heuristics (str_replace) when analyses confirm or
+     contradict them.
+   - Remove outdated heuristics (delete or str_replace) when the codebase
+     has clearly moved on.
+3. Organize related heuristics into themed files when it helps —
+   for example `architecture.md`, `conventions.md`, `gotchas.md`.
 
 Good heuristics are:
-- Specific to this codebase (not generic programming advice)
+- Specific to *this* codebase (not generic programming advice)
 - Stable (still useful in a week, not tied to one file)
 - Actionable when injected into the analyzer's system prompt
 
-Examples of good heuristics:
-- "The codebase follows a `core/` (logic) + `cli/` (entry) split. Treat files
-  under `core/` as library code; files under `cli/` are thin shells that
-  delegate to core."
+Examples:
+- "The codebase splits `core/` (logic) and `cli/` (entry). Treat `core/` as
+  library code; `cli/` as thin shells delegating to core."
 - "Tests live alongside source files as `*_test.go`. When summarizing a test
   file, reference the file under test."
-- "Functions prefixed with `_` are intentionally private; do not list them as
-  key_symbols."
+- "Functions prefixed with `_` are intentionally private; do not list them
+  as key_symbols."
 
-Return JSON: {"heuristics": [{"text": "...", "tags": ["..."]}, ...]}
-Aim for 3-10 high-signal heuristics. Replace, don't append: every reflection
-produces a fresh canonical list.
+Aim for a small total — 5 to 15 heuristics across 1-3 files. Quality over
+volume. When you're done editing memory, briefly summarize what you changed.
 """
 
 
@@ -92,27 +107,6 @@ FILE_SCHEMA = {
         "notes": {"type": "string"},
     },
     "required": ["language", "purpose", "key_symbols", "dependencies", "notes"],
-    "additionalProperties": False,
-}
-
-
-REFLECTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "heuristics": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["text", "tags"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["heuristics"],
     "additionalProperties": False,
 }
 
@@ -139,17 +133,15 @@ class DiscoverAgent:
     def _system_blocks(self) -> list[dict]:
         """System prompt with cached base instructions and live heuristics.
 
-        The base portion is stable across requests so we cache it. The
-        heuristics section sits after the cache breakpoint — it changes as
-        the agent learns, but the large stable preamble stays warm.
+        The base portion is stable across requests so we cache it. Heuristics
+        sit after the cache breakpoint — they change as the agent learns,
+        but the stable preamble stays warm.
         """
-        heuristics = self.memory.heuristics()
-        if heuristics:
-            heuristics_text = "\n\nLearned heuristics for this codebase:\n" + "\n".join(
-                f"- {h.text}" for h in heuristics
-            )
+        heuristics_text = self.memory.heuristics_text()
+        if heuristics_text:
+            tail = "\n\nLearned heuristics for this codebase:\n\n" + heuristics_text
         else:
-            heuristics_text = "\n\n(No learned heuristics yet — this is the first pass.)"
+            tail = "\n\n(No learned heuristics yet — this is the first pass.)"
 
         return [
             {
@@ -157,7 +149,7 @@ class DiscoverAgent:
                 "text": BASE_SYSTEM,
                 "cache_control": {"type": "ephemeral"},
             },
-            {"type": "text", "text": heuristics_text},
+            {"type": "text", "text": tail},
         ]
 
     # ------------------------------------------------------------------
@@ -235,13 +227,13 @@ class DiscoverAgent:
         return record
 
     # ------------------------------------------------------------------
-    # Reflection — the self-improvement loop
+    # Reflection — the self-improvement loop, driven by the Memory tool
     # ------------------------------------------------------------------
 
-    def reflect(self, sample_size: int = 30) -> list[Heuristic]:
+    def reflect(self, sample_size: int = 30) -> None:
         records = self.memory.all_files()
         if not records:
-            return []
+            return
 
         sample = sorted(records, key=lambda r: r.analyzed_at, reverse=True)[:sample_size]
         payload = [
@@ -256,30 +248,27 @@ class DiscoverAgent:
             for r in sample
         ]
 
-        prompt = (
-            "Here are recent per-file analyses from the discover agent. "
-            "Produce a fresh canonical list of codebase-level heuristics.\n\n"
-            f"{json.dumps(payload, indent=2)}"
+        memory_tool = BetaLocalFilesystemMemoryTool(
+            base_path=str(self.memory.heuristics_dir)
         )
 
-        response = self.client.messages.create(
+        runner = self.client.beta.messages.tool_runner(
             model=self.model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=REFLECTION_SYSTEM,
-            output_config={"format": {"type": "json_schema", "schema": REFLECTION_SCHEMA}},
-            messages=[{"role": "user", "content": prompt}],
+            tools=[memory_tool],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Recent per-file analyses from the discover agent are below. "
+                        "Update your codebase heuristics in /memories accordingly.\n\n"
+                        f"{json.dumps(payload, indent=2)}"
+                    ),
+                }
+            ],
         )
-
-        text_block = next((b.text for b in response.content if b.type == "text"), None)
-        if text_block is None:
-            return []
-        data = json.loads(text_block)
-
-        new_heuristics = [
-            Heuristic(text=h["text"], tags=h.get("tags", [])) for h in data["heuristics"]
-        ]
-        self.memory.replace_heuristics(new_heuristics)
-        return new_heuristics
+        runner.until_done()
 
     # ------------------------------------------------------------------
     # Top-level scan
@@ -317,12 +306,10 @@ class DiscoverAgent:
             since_reflect += 1
 
             if since_reflect >= self.reflect_every:
-                self.memory.save()
                 self.reflect()
                 since_reflect = 0
 
         if analyzed and since_reflect > 0:
             self.reflect()
 
-        self.memory.save()
         return {"analyzed": analyzed, "skipped": skipped, **self.memory.stats()}
