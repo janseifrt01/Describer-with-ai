@@ -67,14 +67,47 @@ Customize the reflection cadence:
 discover-agent --reflect-every 5 ./src
 ```
 
+## CLAUDE.md bridge
+
+The agent's memory connects to the broader Claude Code / Cursor / dev-notes
+ecosystem in both directions.
+
+**Seed the agent with what you (or Claude Code) already know:**
+
+```bash
+discover-agent --import-claude-md CLAUDE.md ./src
+discover-agent --import-claude-md CLAUDE.md --import-claude-md docs/ARCH.md ./src
+```
+
+Each imported file lands in `memory/heuristics/imported__<name>.md` with a
+provenance header. The next reflection pass reviews it and decides whether
+to keep, integrate, or replace.
+
+**Hand the agent's memory back to your next session:**
+
+```bash
+discover-agent --export-claude-md CLAUDE.md ./src
+```
+
+Writes a self-contained Markdown summary — current heuristics plus a
+table of files analyzed grouped by language — that drops straight into a
+project's `CLAUDE.md` so the next Claude Code session starts with the
+agent's accumulated context.
+
+Both flags can be combined with `--reflect-only`, or used with no scan
+path at all (`discover-agent --import-claude-md FOO.md` just imports).
+
 ## As a library
 
 ```python
-from discover_agent import DiscoverAgent, Memory
+from discover_agent import DiscoverAgent, Memory, import_claude_md, export_claude_md
 
 memory = Memory("memory")
 agent = DiscoverAgent(memory=memory, reflect_every=10)
-agent.scan("./src")
+
+import_claude_md("CLAUDE.md", memory)        # seed
+agent.scan("./src")                          # learn
+export_claude_md("CLAUDE.md", memory)        # share back
 
 for record in memory.all_files():
     print(record.path, "—", record.purpose)
@@ -90,6 +123,7 @@ discover_agent/
 ├── __init__.py
 ├── __main__.py    # CLI: discover-agent <path>
 ├── agent.py       # DiscoverAgent — scan + analyze_file + reflect
+├── bridge.py      # import/export CLAUDE.md
 └── memory.py      # Memory, FileRecord
 memory/
 ├── files/         # one Markdown file per analyzed source file
