@@ -126,8 +126,10 @@ class Memory:
         self.root = Path(root)
         self.files_dir = self.root / "files"
         self.heuristics_dir = self.root / "heuristics"
+        self.solutions_dir = self.root / "solutions"
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self.heuristics_dir.mkdir(parents=True, exist_ok=True)
+        self.solutions_dir.mkdir(parents=True, exist_ok=True)
         self._files: dict[str, FileRecord] = {}
         self._load()
 
@@ -198,10 +200,39 @@ class Memory:
     def heuristics_files(self) -> list[Path]:
         return sorted(self.heuristics_dir.rglob("*.md"))
 
+    # -- Solutions -----------------------------------------------------
+
+    def solution_dir_for(self, slug: str) -> Path:
+        """Per-solution directory inside ``memory/solutions/``.
+
+        Created on demand. Owns ``problem.md``, ``rubric.md``, ``seed.md``,
+        ``winner.md``, ``runners-up/``, ``trace.jsonl`` and the OpenEvolve
+        scratch dir.
+        """
+        d = self.solutions_dir / safe_slug(slug)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def solutions(self) -> list[str]:
+        if not self.solutions_dir.exists():
+            return []
+        return sorted(
+            p.name for p in self.solutions_dir.iterdir()
+            if p.is_dir() and not p.name.startswith(".")
+        )
+
     # -- Stats ---------------------------------------------------------
 
     def stats(self) -> dict[str, int]:
         return {
             "files": len(self._files),
             "heuristics_files": len(self.heuristics_files()),
+            "solutions": len(self.solutions()),
         }
+
+
+def safe_slug(text: str) -> str:
+    """Filesystem-safe slug for solution / problem identifiers."""
+    s = re.sub(r"[^A-Za-z0-9_.\-]+", "-", text.strip().lower())
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s or "unnamed"

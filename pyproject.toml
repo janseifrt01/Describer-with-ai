@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "anthropic>=0.92.0",
+    "openevolve>=0.2.27",
     "PyYAML>=6.0",
 ]
 
