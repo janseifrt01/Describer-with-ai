@@ -8,3 +8,7 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# OpenEvolve raw checkpoints and program databases (per-run scratch).
+# winner.md / runners-up / trace.jsonl are committed; the raw run dir is not.
+memory/solutions/*/openevolve_run/
